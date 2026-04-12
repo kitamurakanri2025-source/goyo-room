@@ -32,7 +32,7 @@ def fetch_rakuten_ranking(genre_id: str) -> list[dict]:
 
 
 def collect_candidate_products() -> list[dict]:
-    """20〜30代男性向けカテゴリから候補商品を収集"""
+    """カテゴリから候補商品を収集"""
     genre_configs = [
         ("日用品・生活用品", "558944"),
         ("食品・飲料",       "100227"),
@@ -52,7 +52,7 @@ def collect_candidate_products() -> list[dict]:
 
 
 def select_products_with_claude(candidates: list[dict]) -> list[dict]:
-    """Claude APIを使って20〜30代男性向けに最適な5商品を選定"""
+    """Claude APIを使って紹介価値の高い5商品を選定"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
     product_list = []
@@ -65,11 +65,11 @@ def select_products_with_claude(candidates: list[dict]) -> list[dict]:
         )
 
     prompt = f"""以下は楽天市場のデイリーランキングから取得した商品リストです。
-20〜30代の男性をターゲットに、日用品・食品・スキンケアカテゴリから
+日用品・食品・スキンケアカテゴリから
 最も紹介価値の高い商品を5つ選んでください。
 
 選定基準:
-- 20〜30代男性の生活に役立つ実用的な商品
+- 幅広い人に役立つ実用的な商品
 - レビューが高評価または人気が高い商品
 - バリエーションを持たせる（カテゴリが偏らないように）
 - コストパフォーマンスが良い商品
@@ -123,19 +123,17 @@ def generate_post_content(item: dict) -> dict:
 - 説明: {item_caption}
 - URL: {item_url}
 
-ターゲット: 20〜30代男性
-
 以下の3つを作成してください:
 
 【楽天ROOM投稿文】
 - 200〜300文字
 - 商品の魅力を自然な言葉で伝える
-- 男性目線で実用的なポイントを強調
+- 誰にでも伝わる実用的なポイントを強調
 - 絵文字を適度に使用
 
 【30秒動画台本】
 - ナレーション形式（30秒 = 約150文字）
-- 冒頭でフック（興味を引く一言）
+- 冒頭は必ず「楽天ユーザー必見！」から始める
 - 商品の特徴を3点紹介
 - CTAで締める（「リンクはROOMから！」等）
 
@@ -185,7 +183,7 @@ def save_to_file(
 
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(f"# 楽天ROOM 投稿コンテンツ - {today}\n")
-        f.write("# ターゲット: 20〜30代男性\n")
+        f.write("# 楽天市場 デイリーランキング厳選\n")
         f.write("=" * 60 + "\n\n")
 
         for i, (item, content) in enumerate(zip(products, contents), 1):
@@ -239,7 +237,7 @@ def main():
         return
 
     # Step 2: Claude APIで5商品を選定
-    print("Step 2: Claude APIで20〜30代男性向け5商品を選定中...")
+    print("Step 2: Claude APIで紹介すべき5商品を選定中...")
     selected_products = select_products_with_claude(candidates)
     print(f"   → {len(selected_products)}商品を選定しました")
     for item in selected_products:
