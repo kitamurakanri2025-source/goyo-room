@@ -52,53 +52,80 @@ def collect_candidate_products() -> list[dict]:
 
 
 def select_products_with_claude(candidates: list[dict]) -> list[dict]:
-    """Claude APIを使って紹介価値の高い5商品を選定"""
+    """Claude APIを使ってレビュー数の比率を保ちながら5商品を選定
+
+    レビュー少なめ（50〜200件）: 3商品
+    レビュー多め（200件超）    : 2商品
+    """
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    product_list = []
-    for i, item in enumerate(candidates, 1):
-        product_list.append(
+    # レビュー数でグループ分け
+    few_reviews = [
+        item for item in candidates
+        if 50 <= item.get("reviewCount", 0) <= 200
+    ]
+    many_reviews = [
+        item for item in candidates
+        if item.get("reviewCount", 0) > 200
+    ]
+
+    def build_product_list(items: list[dict]) -> str:
+        return "\n".join(
             f"{i}. [{item.get('_category', '不明')}] "
             f"{item.get('itemName', '不明')[:60]} "
             f"- ¥{item.get('itemPrice', 0):,} "
             f"(レビュー平均: {item.get('reviewAverage', 0)}点 / {item.get('reviewCount', 0)}件)"
+            for i, item in enumerate(items, 1)
         )
 
-    prompt = f"""以下は楽天市場のデイリーランキングから取得した商品リストです。
-日用品・食品・スキンケアカテゴリから
-最も紹介価値の高い商品を5つ選んでください。
+    def select_from_group(items: list[dict], count: int) -> list[dict]:
+        if not items:
+            return []
+        if len(items) <= count:
+            return items[:count]
+
+        prompt = f"""以下の商品リストから、紹介価値の高い{count}商品を選んでください。
 
 選定基準:
 - 幅広い人に役立つ実用的な商品
-- レビューが高評価または人気が高い商品
 - バリエーションを持たせる（カテゴリが偏らないように）
 - コストパフォーマンスが良い商品
 
 商品リスト:
-{chr(10).join(product_list)}
+{build_product_list(items)}
 
-回答形式: 選んだ商品の番号をカンマ区切りで返してください（例: 1,5,8,12,15）
+回答形式: 選んだ商品の番号をカンマ区切りで返してください（例: 1,3,5）
 番号のみを返してください。"""
 
-    message = client.messages.create(
-        model="claude-opus-4-6",
-        max_tokens=100,
-        messages=[{"role": "user", "content": prompt}],
-    )
+        message = client.messages.create(
+            model="claude-opus-4-6",
+            max_tokens=50,
+            messages=[{"role": "user", "content": prompt}],
+        )
 
-    selected_indices_str = message.content[0].text.strip()
-    selected_indices = [
-        int(x.strip()) - 1
-        for x in selected_indices_str.split(",")
-        if x.strip().isdigit()
-    ]
+        indices_str = message.content[0].text.strip()
+        indices = [
+            int(x.strip()) - 1
+            for x in indices_str.split(",")
+            if x.strip().isdigit()
+        ]
 
-    selected = []
-    for idx in selected_indices[:5]:
-        if 0 <= idx < len(candidates):
-            selected.append(candidates[idx])
+        selected = []
+        for idx in indices[:count]:
+            if 0 <= idx < len(items):
+                selected.append(items[idx])
+        return selected
 
-    return selected
+    # 各グループから選定してレビュー区分タグを付与
+    selected_few = select_from_group(few_reviews, 3)
+    for item in selected_few:
+        item["_review_tier"] = "few"
+
+    selected_many = select_from_group(many_reviews, 2)
+    for item in selected_many:
+        item["_review_tier"] = "many"
+
+    return selected_few + selected_many
 
 
 def generate_post_content(item: dict) -> dict:
@@ -112,6 +139,23 @@ def generate_post_content(item: dict) -> dict:
     review_count = item.get("reviewCount", 0)
     item_caption = item.get("itemCaption", "")[:200]
     category = item.get("_category", "日用品")
+    review_tier = item.get("_review_tier", "many")
+
+    if review_tier == "few":
+        script_instruction = (
+            "- 冒頭は必ず「楽天ユーザー必見！」から始める\n"
+            "- 続けて「レビューが少なくて迷っている人も多いと思いますが、"
+            "調べたらかなり良かったので紹介します」という流れで不安を払拭する内容にする\n"
+            "- 商品の特徴を3点紹介\n"
+            "- CTAで締める（「リンクはROOMから！」等）"
+        )
+    else:
+        script_instruction = (
+            "- 冒頭は必ず「楽天ユーザー必見！」から始める\n"
+            "- 続けて「レビュー多数の実績ある商品をコスパ重視で紹介します」という流れにする\n"
+            "- 商品の特徴を3点紹介\n"
+            "- CTAで締める（「リンクはROOMから！」等）"
+        )
 
     prompt = f"""楽天市場の以下の商品について、楽天ROOMの投稿コンテンツを作成してください。
 
@@ -133,9 +177,7 @@ def generate_post_content(item: dict) -> dict:
 
 【30秒動画台本】
 - ナレーション形式（30秒 = 約150文字）
-- 冒頭は必ず「楽天ユーザー必見！」から始める
-- 商品の特徴を3点紹介
-- CTAで締める（「リンクはROOMから！」等）
+{script_instruction}
 
 【ハッシュタグ】
 - 10〜15個
@@ -192,8 +234,15 @@ def save_to_file(
             item_url = item.get("itemUrl", "")
             category = item.get("_category", "不明")
 
+            review_tier = item.get("_review_tier", "many")
+            review_label = (
+                "レビュー少なめ（50〜200件）" if review_tier == "few"
+                else "レビュー多め（200件超）"
+            )
+
             f.write(f"【商品 {i}】{item_name[:50]}\n")
             f.write(f"カテゴリ: {category}\n")
+            f.write(f"レビュー区分: {review_label}\n")
             f.write(f"価格: ¥{item_price:,}\n")
             f.write(f"URL: {item_url}\n")
             f.write("-" * 40 + "\n\n")
@@ -241,7 +290,8 @@ def main():
     selected_products = select_products_with_claude(candidates)
     print(f"   → {len(selected_products)}商品を選定しました")
     for item in selected_products:
-        print(f"   [{item.get('_category')}] {item.get('itemName', '')[:40]}...")
+        tier_label = "【少】" if item.get("_review_tier") == "few" else "【多】"
+        print(f"   {tier_label} [{item.get('_category')}] {item.get('itemName', '')[:40]}...")
     print()
 
     # Step 3: 各商品のコンテンツを生成
