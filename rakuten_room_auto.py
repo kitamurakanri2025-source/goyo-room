@@ -36,6 +36,7 @@ CHATWORK_ROOM_ID     = "433364514"
 SPREADSHEET_ID       = "121ZKgULHpZoJG2v0RPif4GpRlBlyx6PkNUDPOziZxpw"
 SHEET_NAME           = "投稿管理（楽天ROOM）"
 GOOGLE_CREDENTIALS_FILE = "google_credentials.json"
+SHEETS_AVAILABLE        = os.path.exists(GOOGLE_CREDENTIALS_FILE)
 
 # ジャンルID（日用品:食品:スキンケア = 1:1:1）
 GENRE_CONFIGS = [
@@ -94,6 +95,9 @@ def _get_sheet():
 
 def load_posted_item_codes() -> set[str]:
     """スプレッドシートから投稿済み商品コードを取得"""
+    if not SHEETS_AVAILABLE:
+        print("  google_credentials.json が見つかりません。スプレッドシートをスキップします。")
+        return set()
     try:
         sheet = _get_sheet()
         records = sheet.get_all_records()
@@ -105,6 +109,9 @@ def load_posted_item_codes() -> set[str]:
 
 def save_to_spreadsheet(item: dict, post_type: str) -> bool:
     """商品情報をスプレッドシートに追記"""
+    if not SHEETS_AVAILABLE:
+        print("  google_credentials.json が見つかりません。スプレッドシートをスキップします。")
+        return False
     try:
         sheet = _get_sheet()
         today = datetime.now().strftime("%Y/%m/%d")
@@ -283,8 +290,17 @@ def select_hidden_gem_product(stable_item: dict, posted_codes: set[str]) -> Opti
 # Claude API: 特徴一言生成（安定枠台本用）
 # ============================================================
 
-def generate_feature_one_liner(item: dict) -> str:
-    """商品の特徴を15文字以内の一言で生成"""
+def _is_credit_error(e: Exception) -> bool:
+    """Anthropic APIのクレジット不足エラーかどうかを判定"""
+    if isinstance(e, anthropic.APIStatusError):
+        if e.status_code == 402:
+            return True
+    msg = str(e).lower()
+    return any(kw in msg for kw in ("credit", "quota", "billing", "insufficient", "payment"))
+
+
+def generate_feature_one_liner(item: dict) -> Optional[str]:
+    """商品の特徴を15文字以内の一言で生成。クレジット不足時は None を返す"""
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     item_name    = item.get("itemName", "")[:60]
     item_caption = item.get("itemCaption", "")[:200]
@@ -303,6 +319,9 @@ def generate_feature_one_liner(item: dict) -> str:
         )
         return message.content[0].text.strip()
     except Exception as e:
+        if _is_credit_error(e):
+            print(f"  クレジット不足のため台本生成をスキップします: {e}")
+            return None
         print(f"  Claude API エラー: {e}")
         return "毎日の生活に役立つ一品"
 
@@ -311,13 +330,20 @@ def generate_feature_one_liner(item: dict) -> str:
 # 台本生成
 # ============================================================
 
-def generate_script_stable(item: dict) -> str:
-    """安定枠の台本（特徴一言は Claude API で生成）"""
+def _fmt_price(item: dict) -> str:
+    """itemPrice を int に変換してカンマ区切りで返す"""
+    return f"{int(item.get('itemPrice', 0) or 0):,}"
+
+
+def generate_script_stable(item: dict) -> Optional[str]:
+    """安定枠の台本（特徴一言は Claude API で生成）。クレジット不足時は None を返す"""
     feature = generate_feature_one_liner(item)
+    if feature is None:
+        return None
     return (
         f"楽天ユーザー必見！\n"
         f"楽天で売れ続けている実力派商品です。\n"
-        f"{item.get('itemName', '')[:30]}、{item.get('itemPrice', 0):,}円、"
+        f"{item.get('itemName', '')[:30]}、{_fmt_price(item)}円、"
         f"星{item.get('reviewAverage', 0)}。\n"
         f"{feature}。買って損なし。\n"
         f"楽天ROOMのリンクからどうぞ。"
@@ -330,7 +356,7 @@ def generate_script_hidden_gem(item: dict) -> str:
         f"楽天ユーザー必見！\n"
         f"楽天で売れてるのにまだ知られていない\n"
         f"良品を見つけました。\n"
-        f"{item.get('itemName', '')[:30]}、{item.get('itemPrice', 0):,}円、"
+        f"{item.get('itemName', '')[:30]}、{_fmt_price(item)}円、"
         f"星{item.get('reviewAverage', 0)}。\n"
         f"気になる人は楽天ROOMのリンクからどうぞ。"
     )
@@ -391,12 +417,15 @@ def save_posts_to_file(posts: list[dict], output_file: str = "today_posts.txt"):
             f.write(f"【投稿 {i}】{item.get('itemName', '')[:50]}\n")
             f.write(f"種別: {post_type}枠\n")
             f.write(f"カテゴリ: {item.get('_category', '')}\n")
-            f.write(f"価格: ¥{item.get('itemPrice', 0):,}\n")
+            f.write(f"価格: ¥{_fmt_price(item)}\n")
             f.write(f"レビュー: {item.get('reviewAverage', 0)}点 / {item.get('reviewCount', 0)}件\n")
             f.write(f"URL: {item.get('itemUrl', '')}\n")
             f.write("-" * 40 + "\n\n")
             f.write("▼ 台本\n")
-            f.write(script + "\n")
+            if script:
+                f.write(script + "\n")
+            else:
+                f.write("（台本生成スキップ: APIクレジット不足）\n")
             f.write("\n" + "=" * 60 + "\n\n")
 
     print(f"today_posts.txt に保存しました（{len(posts)}件）")
@@ -474,7 +503,7 @@ def run_daily_job():
     summary = "\n".join(
         f"・[{p['item'].get('_post_type')}枠] "
         f"{p['item'].get('itemName', '')[:30]} "
-        f"¥{p['item'].get('itemPrice', 0):,}"
+        f"¥{_fmt_price(p['item'])}"
         for p in posts
     )
     send_chatwork_message(
