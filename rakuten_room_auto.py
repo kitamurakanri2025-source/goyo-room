@@ -35,7 +35,8 @@ CHATWORK_API_KEY     = os.environ.get("CHATWORK_API_KEY", "")
 CHATWORK_ROOM_ID     = "433364514"
 SPREADSHEET_ID       = "121ZKgULHpZoJG2v0RPif4GpRlBlyx6PkNUDPOziZxpw"
 SHEET_NAME           = "投稿管理（楽天ROOM）"
-GOOGLE_CREDENTIALS_FILE = "google_credentials.json"
+BASE_DIR             = os.path.dirname(os.path.abspath(__file__))
+GOOGLE_CREDENTIALS_FILE = os.path.join(BASE_DIR, "google_credentials.json")
 SHEETS_AVAILABLE        = os.path.exists(GOOGLE_CREDENTIALS_FILE)
 
 # ジャンルID（日用品:食品:スキンケア = 1:1:1）
