@@ -227,6 +227,21 @@ def search_items(genre_id: str, hits: int = 100) -> list[dict]:
         return []
 
 
+def search_items_by_keyword(keyword: str, hits: int = 100) -> list[dict]:
+    """キーワードで商品検索（ジャンルIDで見つからない場合の代替）"""
+    url = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601"
+    try:
+        data = _rakuten_get(url, {
+            "keyword": keyword,
+            "hits": hits,
+            "sort": "-updateTimestamp",
+        })
+        return [i["Item"] for i in data.get("Items", [])]
+    except requests.RequestException as e:
+        print(f"  キーワード検索 API エラー ({keyword}): {e}")
+        return []
+
+
 # ============================================================
 # 商品フィルタリング
 # ============================================================
@@ -267,11 +282,11 @@ def filter_stable(items: list[dict], posted_codes: set[str]) -> list[dict]:
 
 
 def filter_hidden_gem(items: list[dict], posted_codes: set[str]) -> list[dict]:
-    """穴場枠フィルタ: レビュー 5〜100件、星 3.5〜4.9（タイムスタンプ条件なし）
+    """穴場枠フィルタ: レビュー 5〜200件、星 3.5〜4.9（タイムスタンプ条件なし）
     優先順位: 星高い順 → レビュー件数多い順"""
     filtered = [
         i for i in items
-        if _passes_common_filter(i, posted_codes, 5, 100,
+        if _passes_common_filter(i, posted_codes, 5, 200,
                                  min_rating=3.5, check_timestamp=False)
     ]
     filtered.sort(
@@ -289,15 +304,18 @@ def filter_hidden_gem(items: list[dict], posted_codes: set[str]) -> list[dict]:
 # ============================================================
 
 def select_stable_product(posted_codes: set[str]) -> Optional[dict]:
-    """安定枠: ジャンルをシャッフルして最初に条件を満たす1件を返す"""
+    """安定枠: ジャンルをシャッフルして最初に条件を満たす1件を返す。
+    全ジャンルで見つからない場合はランキング上位10件から条件なしで1件選ぶ。"""
     genres = list(GENRE_CONFIGS)
     random.shuffle(genres)
 
+    all_ranking_items: list[dict] = []
     for category_name, genre_id in genres:
         print(f"  安定枠: 「{category_name}」を検索中...")
         items = fetch_ranking_paged(genre_id, max_items=100)
         for item in items:
             item["_category"] = category_name
+        all_ranking_items.extend(items)
 
         filtered = filter_stable(items, posted_codes)
         if filtered:
@@ -305,20 +323,36 @@ def select_stable_product(posted_codes: set[str]) -> Optional[dict]:
             selected["_post_type"] = "安定"
             return selected
 
+    # フォールバック: ランキング上位10件から条件なしで1件選ぶ
+    print("  安定枠フォールバック: 条件なしでランキング上位から選定中...")
+    candidates = [
+        i for i in all_ranking_items
+        if i.get("itemCode", "") not in posted_codes
+    ]
+    if candidates:
+        selected = candidates[0]
+        selected["_post_type"] = "安定"
+        print(f"  フォールバック選定: {selected.get('itemName', '')[:40]}")
+        return selected
+
     return None
 
 
 def select_hidden_gem_product(stable_item: dict, posted_codes: set[str]) -> Optional[dict]:
-    """穴場枠: 安定枠と同ジャンルを優先し、なければ他ジャンルに拡張"""
-    # 安定枠のジャンルを先頭に、残りを後ろに並べる
+    """穴場枠: 安定枠と同ジャンルを優先し、段階的にフォールバック。
+    Step1: ジャンル検索
+    Step2: キーワード検索（「日用品」「食品」「スキンケア」）
+    Step3: ランキング上位からレビュー最少の商品"""
     stable_category = stable_item.get("_category", "")
-    ordered_genres = sorted(
+    stable_code     = stable_item.get("itemCode", "")
+    ordered_genres  = sorted(
         GENRE_CONFIGS,
         key=lambda g: 0 if g[0] == stable_category else 1,
     )
 
+    # Step1: ジャンルIDで検索
     for category_name, genre_id in ordered_genres:
-        print(f"  穴場枠: 「{category_name}」を検索中...")
+        print(f"  穴場枠 [Step1]: 「{category_name}」をジャンル検索中...")
         items = search_items(genre_id, hits=100)
         for item in items:
             item["_category"] = category_name
@@ -329,9 +363,23 @@ def select_hidden_gem_product(stable_item: dict, posted_codes: set[str]) -> Opti
             selected["_post_type"] = "穴場"
             return selected
 
-    # フォールバック: 全ジャンルのランキングからレビュー数が最も少ない商品を選ぶ
-    print("  穴場枠フォールバック: ランキング上位からレビュー少なめ商品を検索中...")
-    stable_code = stable_item.get("itemCode", "")
+    # Step2: キーワード検索
+    keywords = ["日用品", "食品", "スキンケア"]
+    for keyword in keywords:
+        print(f"  穴場枠 [Step2]: キーワード「{keyword}」で検索中...")
+        items = search_items_by_keyword(keyword, hits=100)
+        for item in items:
+            item["_category"] = keyword
+
+        filtered = filter_hidden_gem(items, posted_codes)
+        if filtered:
+            selected = filtered[0]
+            selected["_post_type"] = "穴場"
+            print(f"  キーワード検索で選定: {selected.get('itemName', '')[:40]}")
+            return selected
+
+    # Step3: ランキング上位からレビュー最少の商品を選ぶ
+    print("  穴場枠 [Step3]: ランキング上位からレビュー少なめ商品を検索中...")
     for category_name, genre_id in ordered_genres:
         items = fetch_ranking_paged(genre_id, max_items=100)
         for item in items:
@@ -346,7 +394,7 @@ def select_hidden_gem_product(stable_item: dict, posted_codes: set[str]) -> Opti
         if candidates:
             selected = candidates[0]
             selected["_post_type"] = "穴場"
-            print(f"  フォールバック選定: {selected.get('itemName', '')[:40]}")
+            print(f"  Step3 選定: {selected.get('itemName', '')[:40]}")
             return selected
 
     return None
