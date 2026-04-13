@@ -88,9 +88,48 @@ def _get_sheet():
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
     ]
-    creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scopes)
-    client = gspread.authorize(creds)
-    return client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
+
+    # 認証ファイル読み込み
+    try:
+        creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scopes)
+    except FileNotFoundError:
+        raise RuntimeError(
+            f"[認証エラー] 認証ファイルが見つかりません: {GOOGLE_CREDENTIALS_FILE}\n"
+            f"  → Google Cloud Console でサービスアカウントのJSONキーを発行し、\n"
+            f"    このスクリプトと同じフォルダに {GOOGLE_CREDENTIALS_FILE} として保存してください。"
+        )
+    except ValueError as e:
+        raise RuntimeError(f"[認証エラー] 認証ファイルの形式が不正です: {e}")
+    except Exception as e:
+        raise RuntimeError(f"[認証エラー] 認証ファイルの読み込みに失敗しました ({type(e).__name__}): {e}")
+
+    # スプレッドシート接続
+    try:
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(SPREADSHEET_ID)
+    except gspread.exceptions.APIError as e:
+        raise RuntimeError(
+            f"[スプレッドシートエラー] APIエラーが発生しました: {e}\n"
+            f"  → サービスアカウントのメールアドレスをスプレッドシートに共有（編集者）しているか確認してください。"
+        )
+    except gspread.exceptions.SpreadsheetNotFound:
+        raise RuntimeError(
+            f"[スプレッドシートエラー] スプレッドシートが見つかりません (ID: {SPREADSHEET_ID})\n"
+            f"  → URLのスプレッドシートIDが正しいか確認してください。"
+        )
+    except Exception as e:
+        raise RuntimeError(f"[スプレッドシートエラー] 接続に失敗しました ({type(e).__name__}): {e}")
+
+    # シート取得
+    try:
+        return spreadsheet.worksheet(SHEET_NAME)
+    except gspread.exceptions.WorksheetNotFound:
+        available = [ws.title for ws in spreadsheet.worksheets()]
+        raise RuntimeError(
+            f"[シートエラー] シート名が見つかりません: '{SHEET_NAME}'\n"
+            f"  → 存在するシート: {available}\n"
+            f"  → SHEET_NAME の値を合わせて修正してください。"
+        )
 
 
 def load_posted_item_codes() -> set[str]:
@@ -103,7 +142,7 @@ def load_posted_item_codes() -> set[str]:
         records = sheet.get_all_records()
         return {str(row["商品コード"]) for row in records if row.get("商品コード")}
     except Exception as e:
-        print(f"スプレッドシート読み込みエラー: {e}")
+        print(f"スプレッドシート読み込みエラー [{type(e).__name__}]:\n  {e}")
         return set()
 
 
@@ -127,9 +166,10 @@ def save_to_spreadsheet(item: dict, post_type: str) -> bool:
             "済",                               # 投稿済みフラグ
         ]
         sheet.append_row(row)
+        print(f"  スプレッドシートに記録しました: {item.get('itemName', '')[:30]}")
         return True
     except Exception as e:
-        print(f"スプレッドシート書き込みエラー: {e}")
+        print(f"スプレッドシート書き込みエラー [{type(e).__name__}]:\n  {e}")
         return False
 
 
@@ -202,7 +242,9 @@ def _is_recently_updated(item: dict) -> bool:
 
 
 def _passes_common_filter(item: dict, posted_codes: set[str],
-                           min_reviews: int, max_reviews: int) -> bool:
+                           min_reviews: int, max_reviews: int,
+                           min_rating: float = 4.0,
+                           check_timestamp: bool = True) -> bool:
     code         = item.get("itemCode", "")
     review_count = item.get("reviewCount", 0)
     review_avg   = float(item.get("reviewAverage", 0))
@@ -211,9 +253,9 @@ def _passes_common_filter(item: dict, posted_codes: set[str],
         return False
     if not (min_reviews <= review_count <= max_reviews):
         return False
-    if not (4.0 <= review_avg < 4.9):
+    if not (min_rating <= review_avg < 4.9):
         return False
-    if not _is_recently_updated(item):
+    if check_timestamp and not _is_recently_updated(item):
         return False
     return True
 
@@ -224,12 +266,15 @@ def filter_stable(items: list[dict], posted_codes: set[str]) -> list[dict]:
 
 
 def filter_hidden_gem(items: list[dict], posted_codes: set[str]) -> list[dict]:
-    """穴場枠フィルタ: レビュー 10〜50件、星 4.0〜4.9、直近3ヶ月更新
-    優先順位: 更新日新しい順 → 星高い順 → レビュー件数多い順"""
-    filtered = [i for i in items if _passes_common_filter(i, posted_codes, 10, 50)]
+    """穴場枠フィルタ: レビュー 5〜100件、星 3.5〜4.9（タイムスタンプ条件なし）
+    優先順位: 星高い順 → レビュー件数多い順"""
+    filtered = [
+        i for i in items
+        if _passes_common_filter(i, posted_codes, 5, 100,
+                                 min_rating=3.5, check_timestamp=False)
+    ]
     filtered.sort(
         key=lambda x: (
-            x.get("updateTimestamp", ""),
             float(x.get("reviewAverage", 0)),
             x.get("reviewCount", 0),
         ),
@@ -281,6 +326,26 @@ def select_hidden_gem_product(stable_item: dict, posted_codes: set[str]) -> Opti
         if filtered:
             selected = filtered[0]
             selected["_post_type"] = "穴場"
+            return selected
+
+    # フォールバック: 全ジャンルのランキングからレビュー数が最も少ない商品を選ぶ
+    print("  穴場枠フォールバック: ランキング上位からレビュー少なめ商品を検索中...")
+    stable_code = stable_item.get("itemCode", "")
+    for category_name, genre_id in ordered_genres:
+        items = fetch_ranking_paged(genre_id, max_items=100)
+        for item in items:
+            item["_category"] = category_name
+
+        candidates = [
+            i for i in items
+            if i.get("itemCode", "") not in posted_codes
+            and i.get("itemCode", "") != stable_code
+        ]
+        candidates.sort(key=lambda x: x.get("reviewCount", 9999))
+        if candidates:
+            selected = candidates[0]
+            selected["_post_type"] = "穴場"
+            print(f"  フォールバック選定: {selected.get('itemName', '')[:40]}")
             return selected
 
     return None
