@@ -553,7 +553,10 @@ def run_daily_job():
     """商品選定・台本生成・スプレッドシート記録・Chatwork 通知"""
     print(f"\n{'='*60}")
     print(f"楽天ROOM 自動投稿 開始: {datetime.now().strftime('%Y年%m月%d日 %H:%M')}")
-    print(f"{'='*60}\n")
+    print(f"{'='*60}")
+    print(f"認証ファイルパス: {GOOGLE_CREDENTIALS_FILE}")
+    print(f"ファイル存在確認: {os.path.exists(GOOGLE_CREDENTIALS_FILE)}")
+    print()
 
     today_str   = datetime.now().strftime("%Y-%m-%d")
     is_event    = today_str in EVENT_DAYS
@@ -658,6 +661,9 @@ def validate_config() -> bool:
 
 def main():
     print("楽天ROOM 自動投稿システム 起動中...")
+    print(f"認証ファイルパス: {GOOGLE_CREDENTIALS_FILE}")
+    print(f"ファイル存在確認: {os.path.exists(GOOGLE_CREDENTIALS_FILE)}")
+    print()
 
     if not validate_config():
         sys.exit(1)
