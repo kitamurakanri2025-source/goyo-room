@@ -133,6 +133,7 @@ def save_to_spreadsheet(item: dict, post_type: str) -> bool:
 def _rakuten_get(url: str, params: dict) -> dict:
     """楽天 API GET（共通）"""
     params["applicationId"] = RAKUTEN_APP_ID
+    params["accessKey"]     = RAKUTEN_ACCESS_KEY
     params["affiliateId"]   = RAKUTEN_AFFILIATE_ID
     params["format"]        = "json"
     response = requests.get(url, params=params, timeout=10)
@@ -142,7 +143,7 @@ def _rakuten_get(url: str, params: dict) -> dict:
 
 def fetch_ranking_paged(genre_id: str, max_items: int = 100) -> list[dict]:
     """ランキング API をページングして最大 max_items 件取得"""
-    url = "https://app.rakuten.co.jp/services/api/IchibaItem/Ranking/20170628"
+    url = "https://openapi.rakuten.co.jp/ichibaranking/api/IchibaItem/Ranking/20220601"
     all_items: list[dict] = []
     page = 1
     per_page = 30
@@ -165,7 +166,7 @@ def fetch_ranking_paged(genre_id: str, max_items: int = 100) -> list[dict]:
 
 def search_items(genre_id: str, hits: int = 100) -> list[dict]:
     """商品検索 API（穴場枠用・更新日新しい順）"""
-    url = "https://app.rakuten.co.jp/services/api/IchibaItem/Search/20220601"
+    url = "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20220601"
     try:
         data = _rakuten_get(url, {
             "genreId": genre_id,
