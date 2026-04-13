@@ -248,6 +248,34 @@ def search_items_by_keyword(keyword: str, hits: int = 100) -> list[dict]:
 
 _THREE_MONTHS_AGO = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d%H%M%S")
 
+# 除外キーワード（女性向け商品を除外）
+_EXCLUDE_KEYWORDS = [
+    "レディース", "女性用", "女性向け", "ガールズ", "レディ", "ウィメンズ",
+    "婦人", "女性限定", "ナイトブラ", "ブラジャー", "ショーツ",
+    "生理", "マタニティ", "レディースファッション",
+]
+
+# 優先キーワード（男性向け・ユニセックス商品を優先）
+_PRIORITY_KEYWORDS = [
+    "メンズ", "男性用", "ユニセックス", "男女兼用",
+]
+
+
+def _gender_score(item: dict) -> int:
+    """性別スコアを返す。
+    -1: 除外対象（女性向けキーワードあり）
+     0: 中立（性別キーワードなし）
+     1: 優先（男性用・ユニセックスキーワードあり）
+    """
+    text = item.get("itemName", "") + " " + item.get("itemCaption", "")
+    for kw in _EXCLUDE_KEYWORDS:
+        if kw in text:
+            return -1
+    for kw in _PRIORITY_KEYWORDS:
+        if kw in text:
+            return 1
+    return 0
+
 
 def _is_recently_updated(item: dict) -> bool:
     ts = item.get("updateTimestamp", "")
@@ -273,12 +301,17 @@ def _passes_common_filter(item: dict, posted_codes: set[str],
         return False
     if check_timestamp and not _is_recently_updated(item):
         return False
+    if _gender_score(item) == -1:
+        return False
     return True
 
 
 def filter_stable(items: list[dict], posted_codes: set[str]) -> list[dict]:
-    """安定枠フィルタ: レビュー 51〜300件、星 4.0〜4.9、直近3ヶ月更新"""
-    return [i for i in items if _passes_common_filter(i, posted_codes, 51, 300)]
+    """安定枠フィルタ: レビュー 51〜300件、星 4.0〜4.9、直近3ヶ月更新
+    優先順位: メンズ・ユニセックス優先 → 中立 → 女性向けは除外"""
+    filtered = [i for i in items if _passes_common_filter(i, posted_codes, 51, 300)]
+    filtered.sort(key=lambda x: _gender_score(x), reverse=True)
+    return filtered
 
 
 def filter_hidden_gem(items: list[dict], posted_codes: set[str]) -> list[dict]:
@@ -291,6 +324,7 @@ def filter_hidden_gem(items: list[dict], posted_codes: set[str]) -> list[dict]:
     ]
     filtered.sort(
         key=lambda x: (
+            _gender_score(x),                  # メンズ・ユニセックス優先
             float(x.get("reviewAverage", 0)),
             x.get("reviewCount", 0),
         ),
