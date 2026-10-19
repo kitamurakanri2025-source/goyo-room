@@ -1,0 +1,5 @@
+.env
+raconne_jobs.csv
+raconne_progress.json
+raconne_debug/
+__pycache__/

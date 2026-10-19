@@ -5,3 +5,4 @@ schedule
 gspread
 google-auth
 python-dotenv
+playwright
