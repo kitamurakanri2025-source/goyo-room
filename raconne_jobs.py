@@ -13,6 +13,7 @@ RACONNE 求人一覧 取得プログラム
 
 import argparse
 import csv
+import io
 import json
 import os
 import random
@@ -31,7 +32,28 @@ from playwright.sync_api import sync_playwright
 # ============================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+ENV_NAMES = [".env", ".env.txt", "env", "env.txt"]  # メモ帳で .txt が付いても読めるように
+
+
+def load_env_file():
+    """.env を探して読み込む（メモ帳の保存形式の違いにも対応）。見つかったパスを返す"""
+    for name in ENV_NAMES:
+        path = os.path.join(BASE_DIR, name)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as f:
+            raw = f.read()
+        encoding = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+        try:
+            text = raw.decode(encoding)
+        except UnicodeDecodeError:
+            text = raw.decode("cp932", errors="ignore")
+        load_dotenv(stream=io.StringIO(text), override=True)
+        return path
+    return None
+
+
+ENV_PATH = load_env_file()
 
 RACONNE_ID       = os.environ.get("RACONNE_ID", "")
 RACONNE_PASSWORD = os.environ.get("RACONNE_PASSWORD", "")
@@ -251,6 +273,13 @@ def main() -> None:
     args = parser.parse_args()
 
     if not RACONNE_ID or not RACONNE_PASSWORD:
+        print(f"探したフォルダ: {BASE_DIR}")
+        if ENV_PATH:
+            print(f"見つかったファイル: {ENV_PATH}")
+            print("→ ファイルはありましたが、RACONNE_ID / RACONNE_PASSWORD の行が読めませんでした。")
+        else:
+            print("→ このフォルダに .env が見つかりませんでした。")
+            print("  フォルダ内のファイル:", ", ".join(sorted(os.listdir(BASE_DIR))))
         sys.exit(".env の RACONNE_ID と RACONNE_PASSWORD を入力してから実行してください。")
 
     if args.reset:
